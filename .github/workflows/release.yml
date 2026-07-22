@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify mod
+        run: npm run release:check
+
+      - name: Package Railyard ZIP
+        run: |
+          mkdir release
+          cp manifest.json index.js README.md LICENSE release/
+          cd release
+          zip -9 "../subway-builder-performance-${GITHUB_REF_NAME}.zip" manifest.json index.js README.md LICENSE
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "subway-builder-performance-${GITHUB_REF_NAME}.zip" \
+            manifest.json \
+            --generate-notes \
+            --title "Subway Builder Performance ${GITHUB_REF_NAME}"

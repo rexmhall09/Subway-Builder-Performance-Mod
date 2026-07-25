@@ -12,11 +12,11 @@ const packageMetadata = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "p
 
 test("keeps runtime and release metadata aligned with the supported game range", () => {
   assert.equal(manifest.id, "subway-builder-performance");
-  assert.equal(manifest.version, "0.2.0");
+  assert.equal(manifest.version, "0.2.1");
   assert.equal(packageMetadata.version, manifest.version);
   assert.equal(manifest.dependencies["subway-builder"], ">=1.4.12 <1.5.0");
   assert.match(source, /const MOD_ID = "subway-builder-performance";/);
-  assert.match(source, /const MOD_VERSION = "0.2.0";/);
+  assert.match(source, /const MOD_VERSION = "0.2.1";/);
 });
 
 function createMap(options = {}) {
@@ -1282,7 +1282,7 @@ test("detailed overlay and benchmark export report measured session data", async
   );
   await copyButton.props.onClick();
   const summary = JSON.parse(harness.clipboardText);
-  assert.equal(summary.modVersion, "0.2.0");
+  assert.equal(summary.modVersion, "0.2.1");
   assert.ok(summary.samples >= 1);
   assert.equal(summary.frameCount, 70);
   assert.ok(summary.durationSeconds >= 1);

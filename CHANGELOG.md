@@ -2,6 +2,12 @@
 
 All notable changes are documented here. Versions follow Semantic Versioning.
 
+## 0.2.1
+
+- Refresh the FPS counter four times per second using a separate half-second rolling sample.
+- Keep adaptive scaling and stable p95 diagnostics on their existing one-second measurement window.
+- Avoid unnecessary overlay text updates.
+
 ## 0.2.0
 
 - Add Native / Safe, Balanced, Maximum Performance, Battery Saver, and Custom presets.

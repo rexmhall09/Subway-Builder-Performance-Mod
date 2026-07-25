@@ -6,13 +6,15 @@
 
   const MOD_ID = "subway-builder-performance";
   const MOD_NAME = "Performance";
-  const MOD_VERSION = "0.2.0";
+  const MOD_VERSION = "0.2.1";
   const SETTINGS_VERSION = 2;
   const GLOBAL_KEY = "__SUBWAY_BUILDER_PERFORMANCE_MOD__";
   const OVERLAY_ID = "subway-builder-performance-fps";
   const SETTINGS_KEY = "settings";
   const LOG_INTERVAL_MS = 10_000;
   const SAMPLE_WINDOW_MS = 1_000;
+  const DISPLAY_FPS_WINDOW_MS = 500;
+  const OVERLAY_REFRESH_MS = 250;
   const BENCHMARK_FRAME_LIMIT = 250_000;
   const MAX_RECORDED_FRAME_MS = 60_000;
   const ADAPTIVE_COOLDOWN_MS = 10_000;
@@ -156,6 +158,9 @@
     lastFrameAt: 0,
     frameTimes: [],
     currentFps: null,
+    displayFps: null,
+    displayFrameTimes: [],
+    lastOverlayUpdateAt: 0,
     p95FrameMs: null,
     longFrames: 0,
     overlay: null,
@@ -791,6 +796,9 @@
     runtime.lastFrameAt = now;
     runtime.frameTimes = [];
     runtime.currentFps = null;
+    runtime.displayFps = null;
+    runtime.displayFrameTimes = [];
+    runtime.lastOverlayUpdateAt = 0;
     runtime.p95FrameMs = null;
     runtime.longFrames = 0;
     runtime.smoothedFrameMs = null;
@@ -806,9 +814,14 @@
     const duration = now - runtime.lastFrameAt;
     if (duration > 0 && duration <= MAX_RECORDED_FRAME_MS) {
       runtime.frameTimes.push(duration);
+      runtime.displayFrameTimes.push({ at: now, duration });
+      updateDisplayFps(now);
     } else if (duration > MAX_RECORDED_FRAME_MS) {
       runtime.sampleStartedAt = now;
       runtime.frameTimes = [];
+      runtime.displayFps = null;
+      runtime.displayFrameTimes = [];
+      runtime.lastOverlayUpdateAt = now;
       runtime.smoothedFrameMs = null;
       resetAdaptiveCounters();
     }
@@ -868,6 +881,27 @@
     runtime.animationFrameId = shouldSampleNow()
       ? window.requestAnimationFrame(sampleFrame)
       : null;
+  }
+
+  function updateDisplayFps(now) {
+    const cutoff = now - DISPLAY_FPS_WINDOW_MS;
+    while (
+      runtime.displayFrameTimes.length > 0
+      && runtime.displayFrameTimes[0].at < cutoff
+    ) {
+      runtime.displayFrameTimes.shift();
+    }
+    if (now - runtime.lastOverlayUpdateAt < OVERLAY_REFRESH_MS) return;
+
+    const elapsed = runtime.displayFrameTimes.reduce(
+      (total, frame) => total + frame.duration,
+      0
+    );
+    runtime.displayFps = elapsed > 0 && runtime.displayFrameTimes.length > 1
+      ? (runtime.displayFrameTimes.length * 1000) / elapsed
+      : null;
+    runtime.lastOverlayUpdateAt = now;
+    updateOverlay();
   }
 
   function percentile(sorted, fraction) {
@@ -1121,6 +1155,7 @@
     overlay.id = OVERLAY_ID;
     overlay.setAttribute("role", "status");
     overlay.setAttribute("aria-label", "Performance diagnostics");
+    overlay.setAttribute("aria-live", "off");
     Object.assign(overlay.style, {
       position: "fixed",
       top: "64px",
@@ -1143,13 +1178,17 @@
   }
 
   function updateOverlay() {
-    if (!runtime.overlay || !runtime.overlay.isConnected || runtime.currentFps === null) return;
+    if (!runtime.overlay || !runtime.overlay.isConnected) return;
+    const fps = runtime.displayFps ?? runtime.currentFps;
+    if (fps === null) return;
+    let text;
     if (!runtime.settings.detailedOverlay) {
-      runtime.overlay.textContent = `${Math.round(runtime.currentFps)} FPS`;
-      return;
+      text = `${Math.round(fps)} FPS`;
+    } else {
+      const p95 = runtime.p95FrameMs === null ? "…" : runtime.p95FrameMs.toFixed(1);
+      text = `${Math.round(fps)} FPS · p95 ${p95} ms\n${Math.round(observedRenderScale() * 100)}% · ${runtime.limitationHint}`;
     }
-    const p95 = runtime.p95FrameMs === null ? "…" : runtime.p95FrameMs.toFixed(1);
-    runtime.overlay.textContent = `${Math.round(runtime.currentFps)} FPS · p95 ${p95} ms\n${Math.round(observedRenderScale() * 100)}% · ${runtime.limitationHint}`;
+    if (runtime.overlay.textContent !== text) runtime.overlay.textContent = text;
   }
 
   function removeOverlay() {
@@ -1564,7 +1603,7 @@
           key: "fps",
           id: `${MOD_ID}-show-fps`,
           label: "Show FPS",
-          description: "Shows a lightweight one-second rolling FPS counter in the upper-right corner.",
+          description: "Shows a lightweight live FPS counter in the upper-right corner.",
           checked: settings.showFps,
           onChange: (value) => change("showFps", value, false)
         }),

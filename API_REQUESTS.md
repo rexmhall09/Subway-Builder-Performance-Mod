@@ -2,6 +2,18 @@
 
 These are public hooks that would enable additional measured optimizations without patching private game code. None is required for the current v0.2 features.
 
+## Context-bound mod storage
+
+Requested:
+
+- bind each mod's manifest ID to its `storage` facade
+- preserve that identity for registered UI event handlers
+- reject writes that cannot be persisted instead of warning and resolving successfully
+
+Why: the documented storage example writes from a settings UI callback, but Subway Builder 1.4.14 clears the active mod context before those callbacks run. Its `storage.set()` then warns and silently skips the write. The mod uses a namespaced standard-browser storage mirror for non-sensitive preferences and copies them into Mod API storage from context-preserving lifecycle hooks.
+
+Safety requirement: storage must remain isolated by manifest ID, JSON-only, and game-owned.
+
 ## UI panel activity
 
 Requested:

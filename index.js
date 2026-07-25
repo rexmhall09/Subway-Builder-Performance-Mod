@@ -6,11 +6,12 @@
 
   const MOD_ID = "subway-builder-performance";
   const MOD_NAME = "Performance";
-  const MOD_VERSION = "0.2.1";
+  const MOD_VERSION = "0.2.2";
   const SETTINGS_VERSION = 2;
   const GLOBAL_KEY = "__SUBWAY_BUILDER_PERFORMANCE_MOD__";
   const OVERLAY_ID = "subway-builder-performance-fps";
   const SETTINGS_KEY = "settings";
+  const LOCAL_SETTINGS_KEY = `${MOD_ID}:settings`;
   const LOG_INTERVAL_MS = 10_000;
   const SAMPLE_WINDOW_MS = 1_000;
   const DISPLAY_FPS_WINDOW_MS = 500;
@@ -134,6 +135,7 @@
 
   const runtime = {
     settings: { ...DEFAULT_SETTINGS },
+    settingsRevision: 0,
     gameActive: false,
     map: null,
     mapSupported: true,
@@ -195,34 +197,36 @@
 
   window[GLOBAL_KEY] = runtime;
 
-  initialize().catch((error) => {
+  try {
+    initialize();
+  } catch (error) {
+    failInitialization(error);
+  }
+
+  function failInitialization(error) {
     console.error(`[${MOD_NAME}] Initialization failed safely.`, error);
     try {
       dispose();
     } catch (cleanupError) {
       console.error(`[${MOD_NAME}] Initialization cleanup also failed.`, cleanupError);
     }
-  });
+  }
 
-  async function initialize() {
-    const storedSettings = await api.storage.get(SETTINGS_KEY, DEFAULT_SETTINGS).catch((error) => {
+  function initialize() {
+    const mirroredSettings = readSettingsMirror();
+    if (mirroredSettings) runtime.settings = sanitizeSettings(mirroredSettings);
+
+    // Start the documented API read while the game still has this mod's context.
+    const storedSettingsPromise = api.storage.get(SETTINGS_KEY, DEFAULT_SETTINGS).catch((error) => {
       console.warn(`[${MOD_NAME}] Settings could not be read; defaults will be used.`, error);
       return DEFAULT_SETTINGS;
     });
-    runtime.settings = sanitizeSettings(storedSettings);
-    if (runtime.disposed) return;
-
-    const needsMigration = Number(storedSettings && storedSettings.settingsVersion) !== SETTINGS_VERSION;
-    if (needsMigration) {
-      // Register lifecycle hooks immediately: a storage write must never delay map recovery.
-      void api.storage.set(SETTINGS_KEY, runtime.settings).catch((error) => {
-        console.warn(`[${MOD_NAME}] Migrated v0.1 settings could not be saved.`, error);
-      });
-    }
 
     resetAdaptiveScale();
     readCurrentGameState();
 
+    // Register every callback before the first await so Subway Builder 1.4.14
+    // captures the manifest mod ID for context-preserving lifecycle hooks.
     api.hooks.onMapReady(handleMapReady);
     if (typeof api.utils.getMap === "function") {
       try {
@@ -234,6 +238,7 @@
     }
     api.hooks.onGameLoaded(() => {
       if (runtime.disposed) return;
+      flushSettingsToApi();
       runtime.gameActive = true;
       readCurrentGameState();
       resetAdaptiveScale();
@@ -256,6 +261,7 @@
     if (typeof api.hooks.onGameSaved === "function") {
       api.hooks.onGameSaved(() => {
         if (runtime.disposed) return;
+        flushSettingsToApi();
         readCurrentGameState();
         recordBenchmarkEvent("game-saved");
         suspendAdaptive(INITIAL_SETTLE_MS);
@@ -270,7 +276,60 @@
 
     registerSettingsPanel();
     syncMonitoring();
+    void finishSettingsInitialization(storedSettingsPromise, mirroredSettings).catch(failInitialization);
     console.info(`[${MOD_NAME}] v${MOD_VERSION} ready (Mod API ${api.version || "unknown"}).`);
+  }
+
+  async function finishSettingsInitialization(storedSettingsPromise, mirroredSettings) {
+    const storedSettings = await storedSettingsPromise;
+    if (runtime.disposed) return;
+
+    if (runtime.settingsRevision === 0) {
+      runtime.settings = sanitizeSettings(mirroredSettings || storedSettings);
+    }
+    writeSettingsMirror(runtime.settings);
+    resetAdaptiveScale();
+    applyLayerLod();
+    applyRenderScale();
+    syncMonitoring();
+    updateOverlay();
+  }
+
+  function readSettingsMirror() {
+    try {
+      const localStorage = window.localStorage;
+      if (!localStorage || typeof localStorage.getItem !== "function") return null;
+      const value = localStorage.getItem(LOCAL_SETTINGS_KEY);
+      return value ? JSON.parse(value) : null;
+    } catch (error) {
+      console.warn(`[${MOD_NAME}] The local settings mirror could not be read.`, error);
+      return null;
+    }
+  }
+
+  function writeSettingsMirror(settings) {
+    try {
+      const localStorage = window.localStorage;
+      if (!localStorage || typeof localStorage.setItem !== "function") return false;
+      localStorage.setItem(LOCAL_SETTINGS_KEY, JSON.stringify(settings));
+      return true;
+    } catch (error) {
+      console.warn(`[${MOD_NAME}] Settings changed for this session but the local mirror could not be saved.`, error);
+      return false;
+    }
+  }
+
+  function flushSettingsToApi() {
+    try {
+      const pendingWrite = api.storage.set(SETTINGS_KEY, { ...runtime.settings });
+      if (pendingWrite && typeof pendingWrite.catch === "function") {
+        void pendingWrite.catch((error) => {
+          console.warn(`[${MOD_NAME}] Settings could not be copied to Mod API storage.`, error);
+        });
+      }
+    } catch (error) {
+      console.warn(`[${MOD_NAME}] Settings could not be copied to Mod API storage.`, error);
+    }
   }
 
   function sanitizeSettings(value) {
@@ -324,6 +383,7 @@
     if (runtime.disposed) return;
     const previous = runtime.settings;
     runtime.settings = sanitizeSettings(nextValue);
+    runtime.settingsRevision += 1;
 
     if (
       previous.adaptiveRenderScale !== runtime.settings.adaptiveRenderScale
@@ -340,12 +400,7 @@
     applyRenderScale();
     syncMonitoring();
     updateOverlay();
-
-    try {
-      await api.storage.set(SETTINGS_KEY, runtime.settings);
-    } catch (error) {
-      console.warn(`[${MOD_NAME}] Settings changed for this session but could not be saved.`, error);
-    }
+    writeSettingsMirror(runtime.settings);
   }
 
   function updateSetting(key, value) {
@@ -422,6 +477,7 @@
   function handleGameEnd() {
     if (runtime.disposed) return;
 
+    flushSettingsToApi();
     finishBenchmarkCapture();
     detachMapListeners();
     restoreAllLayerStatesBeforeRelease();

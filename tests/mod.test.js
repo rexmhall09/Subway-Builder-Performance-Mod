@@ -9,14 +9,15 @@ const vm = require("node:vm");
 const source = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "manifest.json"), "utf8"));
 const packageMetadata = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
+const LOCAL_SETTINGS_KEY = "subway-builder-performance:settings";
 
 test("keeps runtime and release metadata aligned with the supported game range", () => {
   assert.equal(manifest.id, "subway-builder-performance");
-  assert.equal(manifest.version, "0.2.1");
+  assert.equal(manifest.version, "0.2.2");
   assert.equal(packageMetadata.version, manifest.version);
   assert.equal(manifest.dependencies["subway-builder"], ">=1.4.12 <1.5.0");
   assert.match(source, /const MOD_ID = "subway-builder-performance";/);
-  assert.match(source, /const MOD_VERSION = "0.2.1";/);
+  assert.match(source, /const MOD_VERSION = "0.2.2";/);
 });
 
 function createMap(options = {}) {
@@ -97,6 +98,7 @@ function createHarness(options = {}) {
   const elements = new Map();
   const bodyChildren = [];
   const storage = { value: options.savedSettings };
+  const localStorageData = options.localStorageData || new Map();
   const hooks = {};
   const registrations = [];
   const logs = [];
@@ -218,6 +220,17 @@ function createHarness(options = {}) {
   const window = {
     SubwayBuilderAPI: api,
     devicePixelRatio: options.devicePixelRatio || 2,
+    localStorage: {
+      getItem(key) {
+        return localStorageData.has(key) ? localStorageData.get(key) : null;
+      },
+      setItem(key, value) {
+        localStorageData.set(key, String(value));
+      },
+      removeItem(key) {
+        localStorageData.delete(key);
+      }
+    },
     navigator: {
       clipboard: {
         async writeText(value) {
@@ -310,6 +323,7 @@ function createHarness(options = {}) {
     hooks,
     intervals,
     logs,
+    localStorageData,
     mediaQueries,
     registrations,
     storage,
@@ -346,6 +360,10 @@ async function settle() {
   await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
+}
+
+function mirroredSettings(harness) {
+  return JSON.parse(harness.localStorageData.get(LOCAL_SETTINGS_KEY));
 }
 
 function findNode(node, predicate, renderComponents = false) {
@@ -448,6 +466,15 @@ test("v0.1 settings migrate to version two without losing user choices", async (
   assert.equal(settings.minimumRenderScale, 0.5);
   assert.equal(settings.showFps, true);
   assert.equal(settings.diagnosticLogging, true);
+  const mirror = mirroredSettings(harness);
+  assert.equal(mirror.settingsVersion, 2);
+  assert.equal(mirror.adaptiveRenderScale, true);
+  assert.equal(mirror.minimumRenderScale, 0.5);
+  assert.equal(mirror.showFps, true);
+  assert.equal(mirror.diagnosticLogging, true);
+
+  harness.hooks.gameSaved();
+  await settle();
   assert.equal(harness.storage.value.settingsVersion, 2);
   assert.equal(harness.storage.value.adaptiveRenderScale, true);
   assert.equal(harness.storage.value.minimumRenderScale, 0.5);
@@ -536,16 +563,17 @@ test("every preset persists its documented controls independently", async (t) =>
       presetControl.props.onChange(preset);
       await settle();
 
-      assert.equal(harness.storage.value.preset, preset);
+      const persisted = mirroredSettings(harness);
+      assert.equal(persisted.preset, preset);
       assert.deepEqual(
         [
-          harness.storage.value.renderScale,
-          harness.storage.value.adaptiveRenderScale,
-          harness.storage.value.adaptiveTargetFps,
-          harness.storage.value.minimumRenderScale,
-          harness.storage.value.decorativeLod,
-          harness.storage.value.transitLod,
-          harness.storage.value.inactiveWindowMode
+          persisted.renderScale,
+          persisted.adaptiveRenderScale,
+          persisted.adaptiveTargetFps,
+          persisted.minimumRenderScale,
+          persisted.decorativeLod,
+          persisted.transitLod,
+          persisted.inactiveWindowMode
         ],
         expected
       );
@@ -573,8 +601,36 @@ test("monitoring options do not turn a visual preset into Custom", async () => {
 
   fpsToggle.props.onChange(true);
   await settle();
-  assert.equal(harness.storage.value.preset, "balanced");
-  assert.equal(harness.storage.value.showFps, true);
+  const persisted = mirroredSettings(harness);
+  assert.equal(persisted.preset, "balanced");
+  assert.equal(persisted.showFps, true);
+});
+
+test("settings survive a full app restart even when Mod API UI writes are unavailable", async () => {
+  const localStorageData = new Map();
+  const firstRun = createHarness({ localStorageData });
+  await settle();
+
+  const presetControl = findNode(
+    settingsTree(firstRun),
+    (node) => node.props && node.props.id === "subway-builder-performance-preset"
+  );
+  presetControl.props.onChange("balanced");
+  const fpsToggle = findNode(
+    settingsTree(firstRun),
+    (node) => node.props && node.props.id === "subway-builder-performance-show-fps"
+  );
+  fpsToggle.props.onChange(true);
+  await settle();
+
+  const secondRun = createHarness({ localStorageData });
+  await settle();
+  const settings = secondRun.window.__SUBWAY_BUILDER_PERFORMANCE_MOD__.settings;
+  assert.equal(settings.preset, "balanced");
+  assert.equal(settings.adaptiveTargetFps, 45);
+  assert.equal(settings.minimumRenderScale, 0.7);
+  assert.equal(settings.decorativeLod, true);
+  assert.equal(settings.showFps, true);
 });
 
 test("adaptive scaling requires sustained samples, enforces cooldown, and recovers", async () => {
@@ -1282,7 +1338,7 @@ test("detailed overlay and benchmark export report measured session data", async
   );
   await copyButton.props.onClick();
   const summary = JSON.parse(harness.clipboardText);
-  assert.equal(summary.modVersion, "0.2.1");
+  assert.equal(summary.modVersion, "0.2.2");
   assert.ok(summary.samples >= 1);
   assert.equal(summary.frameCount, 70);
   assert.ok(summary.durationSeconds >= 1);

@@ -2,6 +2,12 @@
 
 All notable changes are documented here. Versions follow Semantic Versioning.
 
+## 0.2.2
+
+- Persist every Performance setting immediately across app restarts.
+- Keep the documented Mod API storage path as a lifecycle-backed copy.
+- Register lifecycle hooks before asynchronous initialization so the game preserves the mod context.
+
 ## 0.2.1
 
 - Refresh the FPS counter four times per second using a separate half-second rolling sample.

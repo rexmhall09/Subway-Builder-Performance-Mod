@@ -2,7 +2,7 @@
   "id": "subway-builder-performance",
   "name": "Performance",
   "description": "Adaptive map scaling, optional level of detail, presets, and diagnostics for Subway Builder.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "author": {
     "name": "rexmhall09"
   },

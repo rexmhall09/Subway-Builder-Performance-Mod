@@ -1,19 +1,32 @@
 # Benchmarks
 
-## Rules
+## Reporting rules
 
-Every reported comparison must use the same:
+Every comparison must use the same:
 
 - game version and enabled-mod set
-- save
+- save and save revision
 - camera position, zoom, pitch, and visible layers
 - simulation speed
-- window size and display scaling
-- warm-up period
+- window size, display, and device pixel ratio
+- warm-up and capture duration
 
-Each configuration should run for at least 30 seconds after a 15-second warm-up. Record FPS, p95 frame time, frames over 33.4 ms, canvas size, and available JavaScript heap. Run at least three trials and report the median. Do not compare while an autosave, city download, panel transition, or DevTools recording is active.
+Warm up for 15 seconds, capture for at least 30 seconds, and run three trials per configuration. Report the median of each metric's three trial outputs. Do not capture during autosave, city download, a panel transition, display switching, or DevTools recording.
 
-## Development-machine baseline
+Record:
+
+- median FPS
+- whole-capture p95 frame time and median one-second-window p95
+- long frames over 33.4 ms
+- JavaScript heap when available
+- zoom and render scale
+- paused, normal, or ultra-fast simulation
+- fixed camera, active camera movement, or expensive UI panel
+- correctness result
+
+The in-game **Benchmark snapshot** control exports measured timing, scale and zoom ranges, public save/speed/pause metadata at capture start and stop, focus state, save-event markers, and optional heap data as JSON. Its capture window is independent of adaptive camera and resize stabilization resets. Record the save revision, scene category, exact camera path or open panel, and correctness result alongside each snapshot. Start a new capture for every trial.
+
+## Development-machine reconnaissance
 
 Date: 2026-07-22  
 Game: Subway Builder 1.4.14  
@@ -22,68 +35,110 @@ Platform: macOS, Retina device pixel ratio 2
 Viewport: 1155×1073 CSS pixels  
 Native canvas: 2310×2146 pixels
 
-The following 10-second reconnaissance samples identified the bottleneck before implementation. Other user-installed mods were active, so these are not release-grade isolated A/B results.
+These 10-second samples identified the initial bottleneck. Other installed mods were active, so they are not isolated release results.
 
 | Save | Network | Simulation | Scale | FPS | p95 frame | Worst frame | Frames >33.4 ms | JS heap |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | NYC `save11` | 195 stations, 221 trains | Normal | 100% | 23.0 | 50.4 ms | 122.3 ms | 140 | 124.9 MB |
 | NYC `save11` | 195 stations, 221 trains | Paused | 100% | 23.1 | 50.6 ms | 123.7 ms | 151 | 124.9 MB |
 
-The unchanged paused result is the key finding: renderer cost dominated this scene. It justified testing canvas render scale and ruled out changing simulation behavior as the first intervention.
+The unchanged paused result suggests that this fixed scene was renderer-limited. It justified testing canvas resolution before any simulation change.
 
-## Live integration smoke test
+## v0.1 integration smoke test
 
-The mod was linked into the live mods directory, enabled through the in-game Mod Manager, and exercised on the same large NYC scene. The Performance panel, persistence, render-scale changes, FPS overlay, and restoration to native quality all worked. After an eight-second settle, the visible one-second counter read:
+The v0.1 mod was linked into the live mods directory and exercised on the same large NYC scene. After an eight-second settle, the visible counter read:
 
 | Save | Simulation | Scale | Observed FPS |
 | --- | --- | ---: | ---: |
 | NYC `save11` | Normal | 100% | 24 |
 | NYC `save11` | Normal | 50% | 27 |
 
-That is a 12.5% same-session uplift, but it is a smoke result rather than a release claim. The development hot reload duplicated callbacks from other installed mods, the save continued simulating between readings, and the sample was shorter than the release protocol. The game was left at 100% native quality with the FPS overlay and diagnostic logging disabled.
+The 12.5% difference is a smoke result, not a release claim. The sample was short, other mods were active, and the save continued simulating between readings.
 
-## Main-menu lifecycle check
+## v0.2 isolated baseline matrix
 
-The monitoring lifecycle is deterministic and covered by the release test harness. With **Show FPS** enabled, ending a game session now cancels the pending animation-frame sampler, removes the overlay, releases the map reference, and restores native pixel ratio before the map is released.
+Status: **Pending in-game three-trial runs.**
 
-| State after returning to main menu | Before | After |
-| --- | ---: | ---: |
-| Pending mod animation-frame callback | 1, continuously rescheduled | 0 |
-| Retained MapLibre map reference | 1 | 0 |
-| FPS overlay | Present | Removed |
+No values are inferred from unit tests or the v0.1 smoke test. A row is completed only after all three trials and the correctness checks pass.
 
-This reduces background work and retained memory outside gameplay; it is not presented as an in-game FPS increase.
+| Save | Speed | Scene | Native / Safe | Balanced | Maximum | Battery Saver | Correctness |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| Small | Paused | Fixed camera | Pending | Pending | Pending | Pending | Pending |
+| Small | Normal | Fixed camera | Pending | Pending | Pending | Pending | Pending |
+| Small | Ultra fast | Fixed camera | Pending | Pending | Pending | Pending | Pending |
+| Small | Normal | Active pan/zoom | Pending | Pending | Pending | Pending | Pending |
+| Small | Normal | Expensive panel | Pending | Pending | Pending | Pending | Pending |
+| Large | Paused | Fixed camera | Pending | Pending | Pending | Pending | Pending |
+| Large | Normal | Fixed camera | Pending | Pending | Pending | Pending | Pending |
+| Large | Ultra fast | Fixed camera | Pending | Pending | Pending | Pending | Pending |
+| Large | Normal | Active pan/zoom | Pending | Pending | Pending | Pending | Pending |
+| Large | Normal | Expensive panel | Pending | Pending | Pending | Pending | Pending |
 
-## Release matrix
+### v0.2 release validation snapshots
 
-Release claims remain pending until the mod is enabled in an isolated test profile and the matrix below is completed with three-trial medians.
+Date: 2026-07-25
 
-Automatic render scale uses these same four scale levels. Its controller is unit-tested for sustained-low-FPS downshifts, cooldown behavior, disabled-state inactivity, and hidden-document suspension. A release claim for automatic mode still requires the live matrix below; controller tests do not substitute for an in-game benchmark.
+Game: Subway Builder 1.4.14 via Railyard 0.2.8
 
-| Save class | Simulation | 100% FPS | 85% FPS | 70% FPS | 50% FPS | Correctness checks |
-| --- | --- | ---: | ---: | ---: | ---: | --- |
-| Small | Paused | Pending | Pending | Pending | Pending | Pending |
-| Small | Normal | Pending | Pending | Pending | Pending | Pending |
-| Small | Ultra fast | Pending | Pending | Pending | Pending | Pending |
-| Large | Paused | Pending | Pending | Pending | Pending | Pending |
-| Large | Normal | Pending | Pending | Pending | Pending | Pending |
-| Large | Ultra fast | Pending | Pending | Pending | Pending | Pending |
+Mod API: 1.0.0
+Platform: macOS, DPR 2, 1710×1042 CSS pixels
+
+The v0.2 mod was enabled through the in-game Mod Manager, reloaded successfully (12 public hooks), and its Performance settings were exercised on NYC `save11` (195 stations, 221 trains). These are single, fixed-camera, paused captures with the Settings panel open. The panel limited both captures to approximately 30 FPS, so they validate installation, capture output, pixel-ratio application, and state stability only; they are not a performance comparison or release claim.
+
+| Save | Scene | Scale | Duration | Median FPS | p95 frame | Worst frame | Long frames | Heap | Result |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| NYC `save11` | Paused, fixed camera, Settings panel | 100% | 38.4 s | 30.0 | 34.3 ms | 728.0 ms | 426 | 124.9 MB | v0.2 loaded; stable state |
+| NYC `save11` | Paused, fixed camera, Settings panel | 50% | 43.0 s | 30.0 | 34.2 ms | 728.4 ms | 461 | 124.9 MB | map pixel ratio changed from 2 to 1; stable state |
+
+## Feature isolation matrix
+
+Each optional optimization must also be tested by changing only that feature from a matching baseline.
+
+| Feature | Required comparison | Result |
+| --- | --- | --- |
+| 30/45/60 FPS targets | Same fixed scene and quality floor | Pending |
+| 85/70/50% minimum | Same target and fixed scene | Pending |
+| Decorative LOD | Same distant zoom with audited allowlist layers present | Pending |
+| Transit-detail LOD | Same distant zoom with audited arrows/signals present | Pending |
+| Inactive-window mode | Focused versus unfocused renderer and mod timers | Pending |
+| Pixel-ratio write avoidance | Repeated unchanged resize/style events | Mock coverage added; live trace pending |
+
+An optional feature is removed or revised if it lacks a repeatable benefit, changes simulation behavior, fails to restore map state, or conflicts with a supported game version.
 
 ## Correctness checklist
 
-For each release candidate:
+For every release candidate:
 
-- Load small and large saves at native scale.
-- Change each setting independently and restore it.
-- Select automatic scale long enough to observe a downshift, then select 100% and confirm native quality is restored.
+- Load small and large saves at native quality.
 - Run paused, normal, and ultra-fast simulation.
-- Confirm passenger routing continues to complete.
+- Compare fixed camera, active movement, and expensive UI panels.
+- Change each setting independently, then disable it and verify exact effective restoration.
+- Move the game between displays with different scaling.
+- Change map style with each LOD option enabled and disabled.
+- Confirm passenger routing completes.
 - Confirm trains move, stop, and route normally.
-- Confirm money, revenue, and expenses continue changing normally.
+- Confirm money, revenue, and expenses change normally.
 - Save to a new slot, return to the menu, and reload it.
 - Confirm the mod never writes to save data.
-- Hot reload the mod twice and verify there is one FPS overlay and one settings panel.
-- Return to the main menu and confirm the overlay and monitoring loop stop.
-- Disable the mod and confirm native device-pixel-ratio rendering is restored.
+- Hot reload twice and verify one settings panel, one overlay, and one listener set.
+- Return to the main menu and confirm sampling and logging stop.
+- Disable the mod and confirm the original pixel ratio and effective layer visibility return.
 
-An optimization is removed if the median benefit is not repeatable or if any correctness check fails.
+## Automated coverage
+
+The mock integration suite covers:
+
+- v0.1-to-v0.2 migration
+- every preset's stored controls
+- selectable targets and minimum quality
+- sustained adaptive downshift, p95-only pressure, stabilization exclusion, and recovery
+- movement-event handling that never changes pixel ratio during an active gesture
+- audited LOD allowlists, thresholds, style replacement, and retryable effective visibility restoration
+- inactive-window sampling behavior
+- display device-pixel-ratio changes
+- redundant pixel-ratio write and direct-resize avoidance
+- independent benchmark windows, frozen start/stop metadata, and JSON export
+- partial-startup, game-end, and hot-reload cleanup
+- unsupported-map failure safety
+
+Automated tests validate controller behavior and cleanup. They do not substitute for the pending in-game performance and correctness matrix.

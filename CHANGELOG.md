@@ -2,6 +2,22 @@
 
 All notable changes are documented here. Versions follow Semantic Versioning.
 
+## 0.3.0
+
+Compatibility with Subway Builder 1.5 and 1.6.
+
+- Widen the supported game range to `>=1.4.12 <2.0.0` so the mod installs on Subway Builder 1.5.x and 1.6.x.
+- Persist settings through the game's scoped mod storage on 1.5+, migrate the v0.2 local mirror into it once, and retire the mirror. The 1.4.x mirror fallback remains.
+- Unsubscribe every lifecycle hook on unload using the 1.6 unsubscribe support, so reloads no longer leave listeners behind.
+- Warn once, safely, when an audited LOD allowlist matches no layer in the running game build, and report allowlist coverage in diagnostics so the 1.5/1.6 map styles can be revalidated.
+
+New features on Subway Builder 1.5+.
+
+- Add opt-in experimental tuning built on the official game-variable API: high-speed update batching (`TICKS_PER_UPDATE` at fast and ultra-fast, capped by `MAX_TICKS_PER_UPDATE`) and reduced pathfinding depth (`MAX_TRANSFERS` lowered by one). Both are off by default, labeled as gameplay-affecting, revert when disabled, and restore game defaults on unload and at game end.
+- Record the stable game session ID, current game day and hour, and per-capture train spawn/removal counts in benchmark snapshots, plus day-change, game-warning, and game-error event markers.
+- Log the active simulation cadence and LOD allowlist coverage in diagnostics.
+- Migrate settings to version 3; existing presets and choices are preserved and the new tuning options default to off.
+
 ## 0.2.2
 
 - Persist every Performance setting immediately across app restarts.

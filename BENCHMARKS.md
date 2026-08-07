@@ -26,6 +26,10 @@ Record:
 
 The in-game **Benchmark snapshot** control exports measured timing, scale and zoom ranges, public save/speed/pause metadata at capture start and stop, focus state, save-event markers, and optional heap data as JSON. Its capture window is independent of adaptive camera and resize stabilization resets. Record the save revision, scene category, exact camera path or open panel, and correctness result alongside each snapshot. Start a new capture for every trial.
 
+## Baseline validity
+
+All recorded results below were measured on Subway Builder 1.4.14. The 1.5.0 release improved large-map performance by roughly 35% on Windows and 15% on Mac and rewrote pathfinding, and 1.6.0 added roughly 15% and 5% more. Treat pre-1.5 numbers as historical: they justify the mod's design but are not valid baselines for new comparisons. Re-run benchmarks on the current game version before publishing any new claim.
+
 ## Development-machine reconnaissance
 
 Date: 2026-07-22  

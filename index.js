@@ -6,8 +6,8 @@
 
   const MOD_ID = "subway-builder-performance";
   const MOD_NAME = "Performance";
-  const MOD_VERSION = "0.2.2";
-  const SETTINGS_VERSION = 2;
+  const MOD_VERSION = "0.3.0";
+  const SETTINGS_VERSION = 3;
   const GLOBAL_KEY = "__SUBWAY_BUILDER_PERFORMANCE_MOD__";
   const OVERLAY_ID = "subway-builder-performance-fps";
   const SETTINGS_KEY = "settings";
@@ -39,6 +39,13 @@
     "route-arrows-path"
   ]);
 
+  const TUNING_BATCHING_OPTIONS = Object.freeze(["off", "conservative", "aggressive"]);
+  const TUNING_BATCHING_MULTIPLIERS = Object.freeze({
+    conservative: { ultrafast: 2 },
+    aggressive: { fast: 2, ultrafast: 4 }
+  });
+  const DEFAULT_MAX_TICKS_PER_UPDATE = 1000;
+
   const RENDER_SCALE_OPTIONS = Object.freeze([
     { value: 1, label: "100% - Native quality" },
     { value: 0.85, label: "85% - High quality" },
@@ -60,7 +67,9 @@
     inactiveWindowMode: false,
     showFps: false,
     detailedOverlay: false,
-    diagnosticLogging: false
+    diagnosticLogging: false,
+    simTickBatching: "off",
+    pathfindingLite: false
   });
 
   const PRESETS = Object.freeze({
@@ -171,6 +180,14 @@
     paused: false,
     simulationSpeed: "unknown",
     saveName: null,
+    gameSessionId: null,
+    gameDay: null,
+    gameHour: null,
+    scopedStorage: null,
+    hookUnsubscribers: [],
+    tuningBaseline: null,
+    tuningWritten: { batching: false, pathfinding: false },
+    lodCoverageWarned: { decorative: false, transit: false },
     mapListeners: [],
     layerSnapshots: {
       decorative: new Map(),
@@ -191,6 +208,7 @@
     benchmarkInitialState: null,
     benchmarkFinalState: null,
     benchmarkEvents: [],
+    benchmarkTrainCounts: { spawned: 0, deleted: 0 },
     benchmarkCapturing: false,
     dispose
   };
@@ -213,13 +231,17 @@
   }
 
   function initialize() {
+    // Capture the mod's storage identity synchronously (Subway Builder 1.5+).
+    // On 1.4.x this is unavailable and the localStorage mirror remains the fallback.
+    runtime.scopedStorage = captureScopedStorage();
+
     const mirroredSettings = readSettingsMirror();
     if (mirroredSettings) runtime.settings = sanitizeSettings(mirroredSettings);
 
     // Start the documented API read while the game still has this mod's context.
-    const storedSettingsPromise = api.storage.get(SETTINGS_KEY, DEFAULT_SETTINGS).catch((error) => {
+    const storedSettingsPromise = storageGet(SETTINGS_KEY, null).catch((error) => {
       console.warn(`[${MOD_NAME}] Settings could not be read; defaults will be used.`, error);
-      return DEFAULT_SETTINGS;
+      return null;
     });
 
     resetAdaptiveScale();
@@ -227,7 +249,7 @@
 
     // Register every callback before the first await so Subway Builder 1.4.14
     // captures the manifest mod ID for context-preserving lifecycle hooks.
-    api.hooks.onMapReady(handleMapReady);
+    registerHook("onMapReady", handleMapReady);
     if (typeof api.utils.getMap === "function") {
       try {
         const currentMap = api.utils.getMap();
@@ -236,37 +258,58 @@
         console.warn(`[${MOD_NAME}] The current map could not be read; onMapReady will be used instead.`, error);
       }
     }
-    api.hooks.onGameLoaded(() => {
+    registerHook("onGameLoaded", () => {
       if (runtime.disposed) return;
       flushSettingsToApi();
       runtime.gameActive = true;
       readCurrentGameState();
       resetAdaptiveScale();
       applyRenderScale();
+      applyTuning();
       syncMonitoring();
     });
-    if (typeof api.hooks.onGameEnd === "function") api.hooks.onGameEnd(handleGameEnd);
-    if (typeof api.hooks.onPauseChanged === "function") {
-      api.hooks.onPauseChanged((paused) => {
-        if (runtime.disposed) return;
-        runtime.paused = paused === true;
-      });
-    }
-    if (typeof api.hooks.onSpeedChanged === "function") {
-      api.hooks.onSpeedChanged((speed) => {
-        if (runtime.disposed) return;
-        runtime.simulationSpeed = String(speed || "unknown");
-      });
-    }
-    if (typeof api.hooks.onGameSaved === "function") {
-      api.hooks.onGameSaved(() => {
-        if (runtime.disposed) return;
-        flushSettingsToApi();
-        readCurrentGameState();
-        recordBenchmarkEvent("game-saved");
-        suspendAdaptive(INITIAL_SETTLE_MS);
-      });
-    }
+    registerHook("onGameEnd", handleGameEnd);
+    registerHook("onPauseChanged", (paused) => {
+      if (runtime.disposed) return;
+      runtime.paused = paused === true;
+    });
+    registerHook("onSpeedChanged", (speed) => {
+      if (runtime.disposed) return;
+      runtime.simulationSpeed = String(speed || "unknown");
+    });
+    registerHook("onGameSaved", () => {
+      if (runtime.disposed) return;
+      flushSettingsToApi();
+      readCurrentGameState();
+      recordBenchmarkEvent("game-saved");
+      suspendAdaptive(INITIAL_SETTLE_MS);
+    });
+    registerHook("onDayChange", (day) => {
+      if (runtime.disposed) return;
+      if (Number.isFinite(Number(day))) runtime.gameDay = Number(day);
+      recordBenchmarkEvent("day-changed");
+    });
+    registerHook("onHourChange", (hour, day) => {
+      if (runtime.disposed) return;
+      if (Number.isFinite(Number(hour))) runtime.gameHour = Number(hour);
+      if (Number.isFinite(Number(day))) runtime.gameDay = Number(day);
+    });
+    registerHook("onWarning", () => {
+      if (runtime.disposed) return;
+      recordBenchmarkEvent("game-warning");
+    });
+    registerHook("onError", () => {
+      if (runtime.disposed) return;
+      recordBenchmarkEvent("game-error");
+    });
+    registerHook("onTrainSpawned", () => {
+      if (runtime.disposed || !runtime.benchmarkCapturing) return;
+      runtime.benchmarkTrainCounts.spawned += 1;
+    });
+    registerHook("onTrainDeleted", () => {
+      if (runtime.disposed || !runtime.benchmarkCapturing) return;
+      runtime.benchmarkTrainCounts.deleted += 1;
+    });
 
     addDocumentListener("visibilitychange", handleVisibilityChange);
     addWindowListener("focus", handleWindowFocus);
@@ -285,14 +328,69 @@
     if (runtime.disposed) return;
 
     if (runtime.settingsRevision === 0) {
-      runtime.settings = sanitizeSettings(mirroredSettings || storedSettings);
+      // The mirror was the authoritative store in v0.2.x, so it wins when present;
+      // afterwards persistSettings migrates it into Mod API storage and retires it.
+      runtime.settings = sanitizeSettings(mirroredSettings || storedSettings || DEFAULT_SETTINGS);
     }
-    writeSettingsMirror(runtime.settings);
+    persistSettings(runtime.settings);
     resetAdaptiveScale();
     applyLayerLod();
     applyRenderScale();
+    applyTuning();
     syncMonitoring();
     updateOverlay();
+  }
+
+  function registerHook(hookName, callback) {
+    const register = api.hooks[hookName];
+    if (typeof register !== "function") return;
+    // Registration errors for required hooks must propagate to failInitialization.
+    const unsubscribe = register(callback);
+    if (typeof unsubscribe === "function") runtime.hookUnsubscribers.push(unsubscribe);
+  }
+
+  function unsubscribeHooks() {
+    for (const unsubscribe of runtime.hookUnsubscribers) {
+      try {
+        unsubscribe();
+      } catch (error) {
+        console.warn(`[${MOD_NAME}] A lifecycle hook could not be unsubscribed.`, error);
+      }
+    }
+    runtime.hookUnsubscribers = [];
+  }
+
+  function captureScopedStorage() {
+    if (typeof api.storage.scoped !== "function") return null;
+    try {
+      const scoped = api.storage.scoped();
+      return scoped && typeof scoped.get === "function" && typeof scoped.set === "function"
+        ? scoped
+        : null;
+    } catch (error) {
+      console.warn(`[${MOD_NAME}] Scoped storage could not be captured; the local mirror will be used.`, error);
+      return null;
+    }
+  }
+
+  function storageGet(key, fallback) {
+    if (runtime.scopedStorage) return Promise.resolve(runtime.scopedStorage.get(key, fallback));
+    // The trailing manifest ID is honored by Subway Builder 1.5+ and ignored by 1.4.x.
+    return Promise.resolve(api.storage.get(key, fallback, MOD_ID));
+  }
+
+  function storageSet(key, value) {
+    if (runtime.scopedStorage) return Promise.resolve(runtime.scopedStorage.set(key, value));
+    return Promise.resolve(api.storage.set(key, value, MOD_ID));
+  }
+
+  function persistSettings(settings) {
+    if (runtime.scopedStorage) {
+      flushSettingsToApi();
+      removeSettingsMirror();
+      return;
+    }
+    writeSettingsMirror(settings);
   }
 
   function readSettingsMirror() {
@@ -319,9 +417,19 @@
     }
   }
 
+  function removeSettingsMirror() {
+    try {
+      const localStorage = window.localStorage;
+      if (!localStorage || typeof localStorage.removeItem !== "function") return;
+      localStorage.removeItem(LOCAL_SETTINGS_KEY);
+    } catch {
+      // The retired mirror key is harmless if it cannot be removed.
+    }
+  }
+
   function flushSettingsToApi() {
     try {
-      const pendingWrite = api.storage.set(SETTINGS_KEY, { ...runtime.settings });
+      const pendingWrite = storageSet(SETTINGS_KEY, { ...runtime.settings });
       if (pendingWrite && typeof pendingWrite.catch === "function") {
         void pendingWrite.catch((error) => {
           console.warn(`[${MOD_NAME}] Settings could not be copied to Mod API storage.`, error);
@@ -345,7 +453,7 @@
     const minimumRenderScale = MINIMUM_SCALE_OPTIONS.includes(requestedMinimum)
       ? requestedMinimum
       : DEFAULT_SETTINGS.minimumRenderScale;
-    const isVersionTwo = Number(source.settingsVersion) === SETTINGS_VERSION;
+    const isVersionTwo = Number(source.settingsVersion) >= 2;
     const preset = isVersionTwo && (
       source.preset === "custom"
       || Object.prototype.hasOwnProperty.call(PRESETS, source.preset)
@@ -371,7 +479,11 @@
       ...(preset !== "custom" && PRESETS[preset] ? PRESETS[preset].values : visualSettings),
       showFps: source.showFps === true,
       detailedOverlay: source.detailedOverlay === true,
-      diagnosticLogging: source.diagnosticLogging === true
+      diagnosticLogging: source.diagnosticLogging === true,
+      simTickBatching: TUNING_BATCHING_OPTIONS.includes(source.simTickBatching)
+        ? source.simTickBatching
+        : DEFAULT_SETTINGS.simTickBatching,
+      pathfindingLite: source.pathfindingLite === true
     };
   }
 
@@ -398,9 +510,15 @@
     if (!runtime.settings.transitLod && previous.transitLod) restoreLayerGroup("transit");
     applyLayerLod();
     applyRenderScale();
+    if (
+      previous.simTickBatching !== runtime.settings.simTickBatching
+      || previous.pathfindingLite !== runtime.settings.pathfindingLite
+    ) {
+      applyTuning();
+    }
     syncMonitoring();
     updateOverlay();
-    writeSettingsMirror(runtime.settings);
+    persistSettings(runtime.settings);
   }
 
   function updateSetting(key, value) {
@@ -455,6 +573,7 @@
 
     runtime.map = map;
     runtime.mapMoving = false;
+    runtime.lodCoverageWarned = { decorative: false, transit: false };
     runtime.lastDevicePixelRatio = nativePixelRatio();
     const originalRatio = readMapPixelRatio(map);
     runtime.mapSupported = typeof map.setPixelRatio === "function" && originalRatio !== null;
@@ -482,6 +601,7 @@
     detachMapListeners();
     restoreAllLayerStatesBeforeRelease();
     restoreOriginalRenderScale();
+    restoreTuning();
     runtime.gameActive = false;
     runtime.map = null;
     runtime.mapSupported = true;
@@ -494,6 +614,10 @@
     runtime.paused = false;
     runtime.simulationSpeed = "unknown";
     runtime.saveName = null;
+    runtime.gameSessionId = null;
+    runtime.gameDay = null;
+    runtime.gameHour = null;
+    runtime.lodCoverageWarned = { decorative: false, transit: false };
     resetAdaptiveScale();
     syncMonitoring();
   }
@@ -566,6 +690,7 @@
   function handleStyleLoading() {
     if (runtime.disposed || runtime.applyingLod) return;
     restoreAllLayerStatesBeforeRelease();
+    runtime.lodCoverageWarned = { decorative: false, transit: false };
     resetFrameMeasurements(true);
     suspendAdaptive(INITIAL_SETTLE_MS);
   }
@@ -1106,6 +1231,8 @@
       return;
     }
 
+    warnOnStaleAllowlist(layers);
+
     runtime.applyingLod = true;
     try {
       if (runtime.settings.decorativeLod && zoom <= DECORATIVE_LOD_MAX_ZOOM) {
@@ -1120,6 +1247,41 @@
       }
     } finally {
       runtime.applyingLod = false;
+    }
+  }
+
+  function lodCoverage(layers) {
+    return {
+      decorative: `${layers.filter(isDecorativeLayer).length}/${DECORATIVE_LAYER_IDS.length}`,
+      transit: `${layers.filter(isTransitDetailLayer).length}/${TRANSIT_DETAIL_LAYER_IDS.length}`
+    };
+  }
+
+  function currentLodCoverage() {
+    const map = runtime.map;
+    if (!map || typeof map.getStyle !== "function") return null;
+    try {
+      const style = map.getStyle();
+      return style && Array.isArray(style.layers) ? lodCoverage(style.layers) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function warnOnStaleAllowlist(layers) {
+    if (layers.length === 0) return;
+    const groups = [
+      ["decorative", runtime.settings.decorativeLod, isDecorativeLayer, "Decorative"],
+      ["transit", runtime.settings.transitLod, isTransitDetailLayer, "Transit-detail"]
+    ];
+    for (const [group, enabled, predicate, label] of groups) {
+      if (!enabled || runtime.lodCoverageWarned[group]) continue;
+      if (layers.some(predicate)) continue;
+      runtime.lodCoverageWarned[group] = true;
+      console.warn(
+        `[${MOD_NAME}] ${label} LOD found none of its audited layers in this game build's map style; `
+        + "the toggle is safely inactive. The allowlist may need revalidation for this Subway Builder version."
+      );
     }
   }
 
@@ -1323,6 +1485,169 @@
         console.warn(`[${MOD_NAME}] Current save name could not be read.`, error);
       }
     }
+
+    if (typeof gameState.getGameSessionId === "function") {
+      try {
+        const sessionId = gameState.getGameSessionId();
+        runtime.gameSessionId = typeof sessionId === "string" && sessionId.trim()
+          ? sessionId.trim()
+          : null;
+      } catch {
+        runtime.gameSessionId = null;
+      }
+    }
+
+    if (typeof gameState.getCurrentDay === "function") {
+      try {
+        const day = Number(gameState.getCurrentDay());
+        runtime.gameDay = Number.isFinite(day) ? day : null;
+      } catch {
+        runtime.gameDay = null;
+      }
+    }
+
+    if (typeof gameState.getCurrentHour === "function") {
+      try {
+        const hour = Number(gameState.getCurrentHour());
+        runtime.gameHour = Number.isFinite(hour) ? hour : null;
+      } catch {
+        runtime.gameHour = null;
+      }
+    }
+  }
+
+  function tuningSupport() {
+    return {
+      batching: typeof api.modifyConstants === "function"
+        && typeof api.utils.getConstants === "function",
+      pathfinding: typeof api.modifyPathfindingRules === "function"
+        && typeof api.utils.getPathfindingRules === "function"
+    };
+  }
+
+  function ensureTuningBaseline(support) {
+    const cached = runtime.tuningBaseline;
+    if (
+      cached
+      && (!support.batching || cached.ticksPerUpdate)
+      && (!support.pathfinding || cached.maxTransfers !== null)
+    ) return cached;
+    const baseline = cached || { ticksPerUpdate: null, maxTicksPerUpdate: null, maxTransfers: null };
+    if (support.batching && !baseline.ticksPerUpdate) {
+      try {
+        const constants = api.utils.getConstants();
+        if (constants && typeof constants === "object") {
+          if (constants.TICKS_PER_UPDATE && typeof constants.TICKS_PER_UPDATE === "object") {
+            baseline.ticksPerUpdate = JSON.parse(JSON.stringify(constants.TICKS_PER_UPDATE));
+          }
+          const ceiling = Number(constants.MAX_TICKS_PER_UPDATE);
+          baseline.maxTicksPerUpdate = Number.isFinite(ceiling) && ceiling > 0
+            ? ceiling
+            : DEFAULT_MAX_TICKS_PER_UPDATE;
+        }
+      } catch (error) {
+        console.warn(`[${MOD_NAME}] Game constants could not be read; update batching stays off.`, error);
+      }
+    }
+    if (support.pathfinding && baseline.maxTransfers === null) {
+      try {
+        const rules = api.utils.getPathfindingRules();
+        const maxTransfers = rules && Number(rules.MAX_TRANSFERS);
+        if (Number.isFinite(maxTransfers) && maxTransfers > 1) baseline.maxTransfers = maxTransfers;
+      } catch (error) {
+        console.warn(`[${MOD_NAME}] Pathfinding rules could not be read; reduced depth stays off.`, error);
+      }
+    }
+    runtime.tuningBaseline = baseline;
+    return baseline;
+  }
+
+  function batchedTicksPatch(baseline, level) {
+    const multipliers = TUNING_BATCHING_MULTIPLIERS[level];
+    if (!multipliers || !baseline.ticksPerUpdate) return null;
+    const patch = {};
+    for (const [tier, factor] of Object.entries(multipliers)) {
+      const original = baseline.ticksPerUpdate[tier];
+      if (!original || typeof original !== "object") continue;
+      const tierPatch = {};
+      for (const [key, value] of Object.entries(original)) {
+        if (!Number.isFinite(Number(value))) continue;
+        tierPatch[key] = Math.min(
+          baseline.maxTicksPerUpdate || DEFAULT_MAX_TICKS_PER_UPDATE,
+          Math.max(1, Math.round(Number(value) * factor))
+        );
+      }
+      if (Object.keys(tierPatch).length > 0) patch[tier] = tierPatch;
+    }
+    return Object.keys(patch).length > 0 ? patch : null;
+  }
+
+  function applyTuning() {
+    const support = tuningSupport();
+    const wantsBatching = runtime.settings.simTickBatching !== "off";
+    const wantsPathfinding = runtime.settings.pathfindingLite === true;
+    if (
+      !wantsBatching && !runtime.tuningWritten.batching
+      && !wantsPathfinding && !runtime.tuningWritten.pathfinding
+    ) return;
+
+    const baseline = ensureTuningBaseline(support);
+
+    if (support.batching && baseline.ticksPerUpdate) {
+      try {
+        if (wantsBatching) {
+          const patch = batchedTicksPatch(baseline, runtime.settings.simTickBatching);
+          if (patch) {
+            api.modifyConstants({ TICKS_PER_UPDATE: patch });
+            runtime.tuningWritten.batching = true;
+          }
+        } else if (runtime.tuningWritten.batching) {
+          api.modifyConstants({
+            TICKS_PER_UPDATE: JSON.parse(JSON.stringify(baseline.ticksPerUpdate))
+          });
+          runtime.tuningWritten.batching = false;
+        }
+      } catch (error) {
+        console.warn(`[${MOD_NAME}] Update batching could not be applied; game defaults remain active.`, error);
+      }
+    }
+
+    if (support.pathfinding && baseline.maxTransfers !== null) {
+      try {
+        if (wantsPathfinding) {
+          api.modifyPathfindingRules({ MAX_TRANSFERS: baseline.maxTransfers - 1 });
+          runtime.tuningWritten.pathfinding = true;
+        } else if (runtime.tuningWritten.pathfinding) {
+          api.modifyPathfindingRules({ MAX_TRANSFERS: baseline.maxTransfers });
+          runtime.tuningWritten.pathfinding = false;
+        }
+      } catch (error) {
+        console.warn(`[${MOD_NAME}] Reduced pathfinding depth could not be applied; game defaults remain active.`, error);
+      }
+    }
+  }
+
+  function restoreTuning() {
+    const baseline = runtime.tuningBaseline;
+    if (!baseline) return;
+    if (runtime.tuningWritten.batching && baseline.ticksPerUpdate) {
+      try {
+        api.modifyConstants({
+          TICKS_PER_UPDATE: JSON.parse(JSON.stringify(baseline.ticksPerUpdate))
+        });
+        runtime.tuningWritten.batching = false;
+      } catch (error) {
+        console.warn(`[${MOD_NAME}] Update batching could not be restored during cleanup.`, error);
+      }
+    }
+    if (runtime.tuningWritten.pathfinding && baseline.maxTransfers !== null) {
+      try {
+        api.modifyPathfindingRules({ MAX_TRANSFERS: baseline.maxTransfers });
+        runtime.tuningWritten.pathfinding = false;
+      } catch (error) {
+        console.warn(`[${MOD_NAME}] Pathfinding depth could not be restored during cleanup.`, error);
+      }
+    }
   }
 
   function captureBenchmarkState() {
@@ -1330,6 +1655,9 @@
       zoom: roundOrNull(currentZoom()),
       renderScalePercent: Math.round(observedRenderScale() * 100),
       saveName: runtime.saveName,
+      sessionId: runtime.gameSessionId,
+      day: runtime.gameDay,
+      hour: runtime.gameHour,
       paused: runtime.paused,
       simulationSpeed: runtime.simulationSpeed,
       focused: runtime.windowFocused,
@@ -1392,12 +1720,15 @@
         ],
       zoom: capturedState.zoom,
       saveName: capturedState.saveName,
+      sessionId: capturedState.sessionId,
       paused: capturedState.paused,
       simulationSpeed: capturedState.simulationSpeed,
       focused: capturedState.focused,
       jsHeapMB: capturedState.jsHeapMB,
       medianJsHeapMB: roundOrNull(median(heapSamples)),
       peakJsHeapMB: heapSamples.length === 0 ? null : roundOrNull(Math.max(...heapSamples)),
+      trainsSpawned: runtime.benchmarkTrainCounts.spawned,
+      trainsDeleted: runtime.benchmarkTrainCounts.deleted,
       events: runtime.benchmarkEvents.slice()
     };
   }
@@ -1425,6 +1756,7 @@
     runtime.benchmarkFrameTimes = [];
     runtime.benchmarkWindowFrameTimes = [];
     runtime.benchmarkEvents = [];
+    runtime.benchmarkTrainCounts = { spawned: 0, deleted: 0 };
     runtime.benchmarkEndedAt = null;
     runtime.benchmarkFinalState = null;
     if (runtime.benchmarkCapturing) {
@@ -1472,6 +1804,26 @@
     runtime.benchmarkLastFrameAt = null;
   }
 
+  function simulationCadenceSnapshot() {
+    if (typeof api.utils.getConstants !== "function") return null;
+    try {
+      const constants = api.utils.getConstants();
+      if (!constants || typeof constants !== "object") return null;
+      const tiers = constants.TICKS_PER_UPDATE;
+      const speed = runtime.simulationSpeed;
+      return {
+        maxTicksPerUpdate: Number.isFinite(Number(constants.MAX_TICKS_PER_UPDATE))
+          ? Number(constants.MAX_TICKS_PER_UPDATE)
+          : null,
+        currentSpeedTicks: tiers && typeof tiers === "object" && tiers[speed] && typeof tiers[speed] === "object"
+          ? { ...tiers[speed] }
+          : null
+      };
+    } catch {
+      return null;
+    }
+  }
+
   function logDiagnostics() {
     if (runtime.currentFps === null) return;
 
@@ -1485,7 +1837,9 @@
       targetFps: runtime.settings.adaptiveRenderScale ? runtime.settings.adaptiveTargetFps : null,
       limitationHint: runtime.limitationHint,
       mapMoving: runtime.mapMoving,
-      canvas: canvas ? `${canvas.width}x${canvas.height}` : null
+      canvas: canvas ? `${canvas.width}x${canvas.height}` : null,
+      lodCoverage: currentLodCoverage(),
+      simulationCadence: simulationCadenceSnapshot()
     };
     console.info(`[${MOD_NAME}:diagnostics]`, details);
   }
@@ -1655,6 +2009,45 @@
         !runtime.mapSupported
           ? h("p", { key: "unsupported", className: "text-xs text-destructive" }, "Render scaling is unsupported by this game build; native quality remains active.")
           : null,
+        (() => {
+          const support = tuningSupport();
+          if (!support.batching && !support.pathfinding) return null;
+          return h("details", { key: "tuning", className: "space-y-3 rounded border border-input p-3" }, [
+            h("summary", { key: "summary", className: "cursor-pointer text-sm font-medium" }, "Experimental tuning (affects gameplay)"),
+            h("div", { key: "content", className: "mt-3 space-y-3" }, [
+              h(
+                "p",
+                { key: "warning", className: "text-xs text-destructive" },
+                "Unlike everything above, these options change simulation update cadence or commuter pathfinding through the official game-variable API. They can change gameplay results and stay off unless you enable them. Both revert to game defaults when disabled."
+              ),
+              support.batching
+                ? h(SelectRow, {
+                    key: "batching",
+                    id: `${MOD_ID}-sim-batching`,
+                    label: "High-speed update batching",
+                    description: "Batches game-state, train, and commuter updates at fast and ultra-fast speeds so large networks stay responsive. Every simulation tick still runs; on-screen numbers and trains refresh less often at high speed.",
+                    value: settings.simTickBatching,
+                    onChange: (value) => change("simTickBatching", value, false),
+                    options: [
+                      { value: "off", label: "Off - Game defaults" },
+                      { value: "conservative", label: "Conservative - 2x batching at ultra-fast" },
+                      { value: "aggressive", label: "Aggressive - 2x at fast, 4x at ultra-fast" }
+                    ]
+                  })
+                : null,
+              support.pathfinding
+                ? h(ToggleRow, {
+                    key: "pathfinding",
+                    id: `${MOD_ID}-pathfinding-lite`,
+                    label: "Reduced pathfinding depth",
+                    description: "Lowers the maximum journey transfers by one. Cuts commute-simulation CPU cost on large networks, but commuters may pick different journeys, which changes ridership.",
+                    checked: settings.pathfindingLite,
+                    onChange: (value) => change("pathfindingLite", value, false)
+                  })
+                : null
+            ])
+          ]);
+        })(),
         h(ToggleRow, {
           key: "fps",
           id: `${MOD_ID}-show-fps`,
@@ -1779,6 +2172,8 @@
     detachMapListeners();
     restoreAllLayerStatesBeforeRelease();
     restoreOriginalRenderScale();
+    restoreTuning();
+    unsubscribeHooks();
     removeDevicePixelRatioWatcher();
     removeDocumentListener("visibilitychange", handleVisibilityChange);
     removeWindowListener("focus", handleWindowFocus);

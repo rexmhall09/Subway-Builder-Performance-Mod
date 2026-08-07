@@ -13,11 +13,11 @@ const LOCAL_SETTINGS_KEY = "subway-builder-performance:settings";
 
 test("keeps runtime and release metadata aligned with the supported game range", () => {
   assert.equal(manifest.id, "subway-builder-performance");
-  assert.equal(manifest.version, "0.2.2");
+  assert.equal(manifest.version, "0.3.0");
   assert.equal(packageMetadata.version, manifest.version);
-  assert.equal(manifest.dependencies["subway-builder"], ">=1.4.12 <1.5.0");
+  assert.equal(manifest.dependencies["subway-builder"], ">=1.4.12 <2.0.0");
   assert.match(source, /const MOD_ID = "subway-builder-performance";/);
-  assert.match(source, /const MOD_VERSION = "0.2.2";/);
+  assert.match(source, /const MOD_VERSION = "0.3.0";/);
 });
 
 function createMap(options = {}) {
@@ -100,6 +100,16 @@ function createHarness(options = {}) {
   const storage = { value: options.savedSettings };
   const localStorageData = options.localStorageData || new Map();
   const hooks = {};
+  const unsubscribes = [];
+  let hookRegistrationCount = 0;
+  function hookRegistration(name, assign) {
+    hookRegistrationCount += 1;
+    assign();
+    return () => {
+      unsubscribes.push(name);
+      delete hooks[name];
+    };
+  }
   const registrations = [];
   const logs = [];
   const frames = new Map();
@@ -166,18 +176,39 @@ function createHarness(options = {}) {
     }
   };
 
+  const constantsCalls = [];
+  const pathfindingCalls = [];
+  function deepMerge(target, patch) {
+    for (const [key, value] of Object.entries(patch)) {
+      if (
+        value && typeof value === "object" && !Array.isArray(value)
+        && target[key] && typeof target[key] === "object"
+      ) {
+        deepMerge(target[key], value);
+      } else {
+        target[key] = value;
+      }
+    }
+  }
+
   const api = {
     version: "1.0.0",
     hooks: {
-      onMapReady(callback) { hooks.mapReady = callback; },
+      onMapReady(callback) { return hookRegistration("mapReady", () => { hooks.mapReady = callback; }); },
       onGameLoaded(callback) {
         if (options.throwOnGameLoadedRegistration) throw new Error("hook registration failed");
-        hooks.gameLoaded = callback;
+        return hookRegistration("gameLoaded", () => { hooks.gameLoaded = callback; });
       },
-      onGameEnd(callback) { hooks.gameEnd = callback; },
-      onPauseChanged(callback) { hooks.pauseChanged = callback; },
-      onSpeedChanged(callback) { hooks.speedChanged = callback; },
-      onGameSaved(callback) { hooks.gameSaved = callback; }
+      onGameEnd(callback) { return hookRegistration("gameEnd", () => { hooks.gameEnd = callback; }); },
+      onPauseChanged(callback) { return hookRegistration("pauseChanged", () => { hooks.pauseChanged = callback; }); },
+      onSpeedChanged(callback) { return hookRegistration("speedChanged", () => { hooks.speedChanged = callback; }); },
+      onGameSaved(callback) { return hookRegistration("gameSaved", () => { hooks.gameSaved = callback; }); },
+      onDayChange(callback) { return hookRegistration("dayChange", () => { hooks.dayChange = callback; }); },
+      onHourChange(callback) { return hookRegistration("hourChange", () => { hooks.hourChange = callback; }); },
+      onWarning(callback) { return hookRegistration("warning", () => { hooks.warning = callback; }); },
+      onError(callback) { return hookRegistration("error", () => { hooks.error = callback; }); },
+      onTrainSpawned(callback) { return hookRegistration("trainSpawned", () => { hooks.trainSpawned = callback; }); },
+      onTrainDeleted(callback) { return hookRegistration("trainDeleted", () => { hooks.trainDeleted = callback; }); }
     },
     ui: {
       registerComponent(placement, registration) {
@@ -190,8 +221,39 @@ function createHarness(options = {}) {
       },
       async set(_key, value) {
         storage.value = { ...value };
-      }
+      },
+      ...(options.scopedStorage
+        ? {
+            scoped() {
+              return {
+                async get(_key, fallback) {
+                  return storage.value === undefined ? fallback : storage.value;
+                },
+                async set(_key, value) {
+                  storage.value = { ...value };
+                  storage.scopedWrites = (storage.scopedWrites || 0) + 1;
+                }
+              };
+            }
+          }
+        : {})
     },
+    ...(options.constants
+      ? {
+          modifyConstants(patch) {
+            constantsCalls.push(JSON.parse(JSON.stringify(patch)));
+            deepMerge(options.constants, patch);
+          }
+        }
+      : {}),
+    ...(options.pathfindingRules
+      ? {
+          modifyPathfindingRules(patch) {
+            pathfindingCalls.push(JSON.parse(JSON.stringify(patch)));
+            deepMerge(options.pathfindingRules, patch);
+          }
+        }
+      : {}),
     gameState: options.gameState === null ? undefined : {
       getGameSpeed() {
         return options.gameSpeed || "normal";
@@ -201,7 +263,16 @@ function createHarness(options = {}) {
       },
       getSaveName() {
         return options.saveName || "Test Save";
-      }
+      },
+      ...(options.sessionId
+        ? { getGameSessionId() { return options.sessionId; } }
+        : {}),
+      ...(options.day !== undefined
+        ? { getCurrentDay() { return options.day; } }
+        : {}),
+      ...(options.hour !== undefined
+        ? { getCurrentHour() { return options.hour; } }
+        : {})
     },
     utils: {
       getMap() {
@@ -209,6 +280,8 @@ function createHarness(options = {}) {
           ? options.getMap()
           : options.currentMap || null;
       },
+      ...(options.constants ? { getConstants() { return options.constants; } } : {}),
+      ...(options.pathfindingRules ? { getPathfindingRules() { return options.pathfindingRules; } } : {}),
       React,
       components: {
         Switch: function Switch() {},
@@ -318,9 +391,13 @@ function createHarness(options = {}) {
   return {
     api,
     bodyChildren,
+    constantsCalls,
+    pathfindingCalls,
     documentListeners,
     frames,
     hooks,
+    unsubscribes,
+    get hookRegistrationCount() { return hookRegistrationCount; },
     intervals,
     logs,
     localStorageData,
@@ -446,7 +523,7 @@ test("partial initialization restores an already-loaded map if later setup fails
   assert.equal(harness.registrations.length, 0);
 });
 
-test("v0.1 settings migrate to version two without losing user choices", async () => {
+test("v0.1 settings migrate to the current settings version without losing user choices", async () => {
   const harness = createHarness({
     savedSettings: {
       renderScale: 0.5,
@@ -458,7 +535,7 @@ test("v0.1 settings migrate to version two without losing user choices", async (
   await settle();
   const settings = harness.window.__SUBWAY_BUILDER_PERFORMANCE_MOD__.settings;
 
-  assert.equal(settings.settingsVersion, 2);
+  assert.equal(settings.settingsVersion, 3);
   assert.equal(settings.preset, "custom");
   assert.equal(settings.renderScale, 1);
   assert.equal(settings.adaptiveRenderScale, true);
@@ -467,7 +544,7 @@ test("v0.1 settings migrate to version two without losing user choices", async (
   assert.equal(settings.showFps, true);
   assert.equal(settings.diagnosticLogging, true);
   const mirror = mirroredSettings(harness);
-  assert.equal(mirror.settingsVersion, 2);
+  assert.equal(mirror.settingsVersion, 3);
   assert.equal(mirror.adaptiveRenderScale, true);
   assert.equal(mirror.minimumRenderScale, 0.5);
   assert.equal(mirror.showFps, true);
@@ -475,7 +552,7 @@ test("v0.1 settings migrate to version two without losing user choices", async (
 
   harness.hooks.gameSaved();
   await settle();
-  assert.equal(harness.storage.value.settingsVersion, 2);
+  assert.equal(harness.storage.value.settingsVersion, 3);
   assert.equal(harness.storage.value.adaptiveRenderScale, true);
   assert.equal(harness.storage.value.minimumRenderScale, 0.5);
   assert.equal(harness.storage.value.showFps, true);
@@ -494,7 +571,7 @@ test("v0.1 fixed quality and monitoring choices survive migration", async () => 
   await settle();
   const settings = harness.window.__SUBWAY_BUILDER_PERFORMANCE_MOD__.settings;
 
-  assert.equal(settings.settingsVersion, 2);
+  assert.equal(settings.settingsVersion, 3);
   assert.equal(settings.preset, "custom");
   assert.equal(settings.renderScale, 0.7);
   assert.equal(settings.adaptiveRenderScale, false);
@@ -1338,7 +1415,7 @@ test("detailed overlay and benchmark export report measured session data", async
   );
   await copyButton.props.onClick();
   const summary = JSON.parse(harness.clipboardText);
-  assert.equal(summary.modVersion, "0.2.2");
+  assert.equal(summary.modVersion, "0.3.0");
   assert.ok(summary.samples >= 1);
   assert.equal(summary.frameCount, 70);
   assert.ok(summary.durationSeconds >= 1);
@@ -1367,11 +1444,17 @@ test("detailed overlay and benchmark export report measured session data", async
     zoom: 11.5,
     renderScalePercent: 100,
     saveName: "Benchmark Save",
+    sessionId: null,
+    day: null,
+    hour: null,
     paused: true,
     simulationSpeed: "ultrafast",
     focused: true,
     jsHeapMB: 128
   });
+  assert.equal(summary.sessionId, null);
+  assert.equal(summary.trainsSpawned, 0);
+  assert.equal(summary.trainsDeleted, 0);
   assert.deepEqual(summary.finalState, summary.initialState);
   assert.deepEqual(summary.events, [{ type: "game-saved", atSeconds: 0 }]);
 });
@@ -1529,4 +1612,279 @@ test("game end restores original state, removes overlay, and releases the map", 
   assert.equal(harness.window.__SUBWAY_BUILDER_PERFORMANCE_MOD__.map, null);
   assert.equal(harness.frames.size, 0);
   assert.equal(harness.bodyChildren.length, 0);
+});
+
+test("scoped storage persists UI changes immediately and retires the localStorage mirror", async () => {
+  const localStorageData = new Map();
+  localStorageData.set(LOCAL_SETTINGS_KEY, JSON.stringify({
+    settingsVersion: 2,
+    preset: "balanced",
+    adaptiveRenderScale: true,
+    adaptiveTargetFps: 45,
+    minimumRenderScale: 0.7,
+    decorativeLod: true
+  }));
+  const harness = createHarness({ scopedStorage: true, localStorageData });
+  await settle();
+
+  const settings = harness.window.__SUBWAY_BUILDER_PERFORMANCE_MOD__.settings;
+  assert.equal(settings.preset, "balanced", "the v0.2 mirror migrates into Mod API storage");
+  assert.equal(harness.storage.value.preset, "balanced");
+  assert.equal(localStorageData.has(LOCAL_SETTINGS_KEY), false, "the mirror key is removed after migration");
+
+  const fpsToggle = findNode(
+    settingsTree(harness),
+    (node) => node.props && node.props.id === "subway-builder-performance-show-fps"
+  );
+  fpsToggle.props.onChange(true);
+  await settle();
+
+  assert.equal(harness.storage.value.showFps, true, "UI writes persist without waiting for a lifecycle hook");
+  assert.equal(localStorageData.has(LOCAL_SETTINGS_KEY), false);
+  assert.ok(harness.storage.scopedWrites >= 1);
+});
+
+test("without scoped storage the 1.4.x mirror path keeps working", async () => {
+  const localStorageData = new Map();
+  const harness = createHarness({ localStorageData });
+  await settle();
+
+  const fpsToggle = findNode(
+    settingsTree(harness),
+    (node) => node.props && node.props.id === "subway-builder-performance-show-fps"
+  );
+  fpsToggle.props.onChange(true);
+  await settle();
+
+  assert.equal(mirroredSettings(harness).showFps, true);
+});
+
+test("dispose unsubscribes every registered lifecycle hook", async () => {
+  const harness = createHarness();
+  await settle();
+
+  assert.ok(harness.hookRegistrationCount >= 12, "all documented hooks are registered when available");
+  harness.window.__SUBWAY_BUILDER_PERFORMANCE_MOD__.dispose();
+  assert.equal(harness.unsubscribes.length, harness.hookRegistrationCount);
+  assert.equal(Object.keys(harness.hooks).length, 0, "no callbacks remain registered after dispose");
+});
+
+test("experimental tuning applies documented multipliers, caps at the ceiling, and restores defaults", async () => {
+  const constants = {
+    TICKS_PER_UPDATE: {
+      normal: { gameState: 1, trainCoords: 1 },
+      fast: { gameState: 4, trainCoords: 2 },
+      ultrafast: { gameState: 12, trainCoords: 6, popMovement: 600 }
+    },
+    MAX_TICKS_PER_UPDATE: 1000
+  };
+  const pathfindingRules = { MAX_TRANSFERS: 4 };
+  const harness = createHarness({
+    constants,
+    pathfindingRules,
+    savedSettings: {
+      settingsVersion: 3,
+      preset: "native",
+      simTickBatching: "aggressive",
+      pathfindingLite: true
+    }
+  });
+  await settle();
+
+  assert.deepEqual(constants.TICKS_PER_UPDATE.fast, { gameState: 8, trainCoords: 4 });
+  assert.deepEqual(constants.TICKS_PER_UPDATE.ultrafast, {
+    gameState: 48,
+    trainCoords: 24,
+    popMovement: 1000
+  }, "the 4x ultra-fast batch is capped at MAX_TICKS_PER_UPDATE");
+  assert.deepEqual(constants.TICKS_PER_UPDATE.normal, { gameState: 1, trainCoords: 1 }, "normal speed is untouched");
+  assert.equal(pathfindingRules.MAX_TRANSFERS, 3);
+
+  const batchingSelect = findNode(
+    settingsTree(harness),
+    (node) => node.props && node.props.id === "subway-builder-performance-sim-batching"
+  );
+  batchingSelect.props.onChange("off");
+  await settle();
+  assert.deepEqual(constants.TICKS_PER_UPDATE.fast, { gameState: 4, trainCoords: 2 });
+  assert.deepEqual(constants.TICKS_PER_UPDATE.ultrafast, { gameState: 12, trainCoords: 6, popMovement: 600 });
+  assert.equal(pathfindingRules.MAX_TRANSFERS, 3, "pathfinding stays reduced until its own toggle changes");
+
+  const pathfindingToggle = findNode(
+    settingsTree(harness),
+    (node) => node.props && node.props.id === "subway-builder-performance-pathfinding-lite"
+  );
+  pathfindingToggle.props.onChange(false);
+  await settle();
+  assert.equal(pathfindingRules.MAX_TRANSFERS, 4);
+
+  const persisted = mirroredSettings(harness);
+  assert.equal(persisted.simTickBatching, "off");
+  assert.equal(persisted.pathfindingLite, false);
+});
+
+test("disposing while tuning is active restores the game defaults", async () => {
+  const constants = {
+    TICKS_PER_UPDATE: { ultrafast: { gameState: 12 } },
+    MAX_TICKS_PER_UPDATE: 1000
+  };
+  const pathfindingRules = { MAX_TRANSFERS: 4 };
+  const harness = createHarness({
+    constants,
+    pathfindingRules,
+    savedSettings: {
+      settingsVersion: 3,
+      preset: "native",
+      simTickBatching: "conservative",
+      pathfindingLite: true
+    }
+  });
+  await settle();
+  assert.equal(constants.TICKS_PER_UPDATE.ultrafast.gameState, 24);
+  assert.equal(pathfindingRules.MAX_TRANSFERS, 3);
+
+  harness.window.__SUBWAY_BUILDER_PERFORMANCE_MOD__.dispose();
+  assert.equal(constants.TICKS_PER_UPDATE.ultrafast.gameState, 12);
+  assert.equal(pathfindingRules.MAX_TRANSFERS, 4);
+});
+
+test("tuning options are hidden and inert when the game variable APIs are unavailable", async () => {
+  const harness = createHarness({
+    savedSettings: {
+      settingsVersion: 3,
+      preset: "native",
+      simTickBatching: "aggressive",
+      pathfindingLite: true
+    }
+  });
+  await settle();
+
+  const tree = settingsTree(harness);
+  assert.equal(
+    findNode(tree, (node) => node.props && node.props.id === "subway-builder-performance-sim-batching", true),
+    null
+  );
+  assert.equal(
+    findNode(tree, (node) => node.props && node.props.id === "subway-builder-performance-pathfinding-lite", true),
+    null
+  );
+});
+
+test("tuning presets do not flip the visual preset to Custom", async () => {
+  const constants = {
+    TICKS_PER_UPDATE: { ultrafast: { gameState: 12 } },
+    MAX_TICKS_PER_UPDATE: 1000
+  };
+  const harness = createHarness({
+    constants,
+    savedSettings: { settingsVersion: 3, preset: "balanced", adaptiveRenderScale: true, adaptiveTargetFps: 45, minimumRenderScale: 0.7, decorativeLod: true }
+  });
+  await settle();
+
+  const batchingSelect = findNode(
+    settingsTree(harness),
+    (node) => node.props && node.props.id === "subway-builder-performance-sim-batching"
+  );
+  batchingSelect.props.onChange("conservative");
+  await settle();
+
+  const persisted = mirroredSettings(harness);
+  assert.equal(persisted.preset, "balanced");
+  assert.equal(persisted.simTickBatching, "conservative");
+});
+
+test("benchmark snapshots record the stable session id, game clock, and train churn", async () => {
+  const harness = createHarness({
+    savedSettings: { settingsVersion: 3, preset: "native", showFps: true },
+    sessionId: "session-uuid-1",
+    day: 3,
+    hour: 7
+  });
+  await settle();
+  harness.hooks.mapReady(createMap());
+
+  const startButton = findNode(
+    settingsTree(harness),
+    (node) => node.type === "button" && node.props.children.flat(Infinity).includes("Start capture"),
+    true
+  );
+  startButton.props.onClick();
+
+  harness.hooks.trainSpawned();
+  harness.hooks.trainSpawned();
+  harness.hooks.trainDeleted();
+  harness.hooks.dayChange(4);
+  harness.runFrames(70, 16.7);
+
+  const copyButton = findNode(
+    settingsTree(harness),
+    (node) => node.type === "button" && node.props.children.flat(Infinity).includes("Copy snapshot"),
+    true
+  );
+  await copyButton.props.onClick();
+  const summary = JSON.parse(harness.clipboardText);
+
+  assert.equal(summary.sessionId, "session-uuid-1");
+  assert.equal(summary.initialState.sessionId, "session-uuid-1");
+  assert.equal(summary.initialState.day, 3);
+  assert.equal(summary.initialState.hour, 7);
+  assert.equal(summary.trainsSpawned, 2);
+  assert.equal(summary.trainsDeleted, 1);
+  assert.deepEqual(summary.events, [{ type: "day-changed", atSeconds: 0 }]);
+  assert.equal(summary.finalState.day, 4);
+});
+
+test("v2 settings migrate to version three with tuning off by default", async () => {
+  const harness = createHarness({
+    savedSettings: {
+      settingsVersion: 2,
+      preset: "maximum",
+      renderScale: 1,
+      adaptiveRenderScale: true,
+      adaptiveTargetFps: 60,
+      minimumRenderScale: 0.5,
+      decorativeLod: true,
+      transitLod: true,
+      inactiveWindowMode: true,
+      showFps: true
+    }
+  });
+  await settle();
+  const settings = harness.window.__SUBWAY_BUILDER_PERFORMANCE_MOD__.settings;
+
+  assert.equal(settings.settingsVersion, 3);
+  assert.equal(settings.preset, "maximum");
+  assert.equal(settings.simTickBatching, "off");
+  assert.equal(settings.pathfindingLite, false);
+  assert.equal(settings.showFps, true);
+});
+
+test("a stale LOD allowlist warns once and stays fail-open", async () => {
+  const harness = createHarness({
+    savedSettings: { settingsVersion: 3, preset: "custom", decorativeLod: true, transitLod: true }
+  });
+  await settle();
+  const map = createMap({
+    zoom: 10,
+    layers: [
+      { id: "renamed-buildings-layer", type: "fill-extrusion" },
+      { id: "routes", type: "line" }
+    ]
+  });
+  harness.hooks.mapReady(map);
+
+  const staleWarnings = harness.logs.filter(
+    (entry) => entry[0] === "warn" && String(entry[1]).includes("allowlist may need revalidation")
+  );
+  assert.equal(staleWarnings.length, 2, "one warning per LOD group");
+  assert.equal(map.calls.filter(([name]) => name === "setLayoutProperty").length, 0, "no layer is touched");
+
+  map.emit("zoomend");
+  assert.equal(
+    harness.logs.filter(
+      (entry) => entry[0] === "warn" && String(entry[1]).includes("allowlist may need revalidation")
+    ).length,
+    2,
+    "the warning is not repeated for the same style"
+  );
 });

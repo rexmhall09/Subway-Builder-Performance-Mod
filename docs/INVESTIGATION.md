@@ -109,4 +109,9 @@ MapLibre and Deck.gl can continue animation work while a map is open. There is n
 
 ## Version safety
 
-The mod uses documented lifecycle hooks, public MapLibre methods, and standard browser focus and visibility events. Every optional map change is feature-checked and wrapped in failure isolation. The manifest remains restricted to Subway Builder 1.4.x from 1.4.12 onward; later versions require revalidation.
+The mod uses documented lifecycle hooks, public MapLibre methods, and standard browser focus and visibility events. Every optional map change is feature-checked and wrapped in failure isolation.
+
+v0.3.0 widens the manifest range to `>=1.4.12 <2.0.0` after auditing the mod's full API surface against the Subway Builder 1.5.0 and 1.6.0 modding documentation: every hook, storage method, gameState getter, and MapLibre call the mod uses remains documented and unchanged. Two items still deserve in-game revalidation on 1.5/1.6 builds:
+
+- The LOD layer allowlists were recovered from the 1.4.14 style, and 1.5/1.6 changed map colors and road rendering. The design is fail-open, and v0.3.0 additionally warns once and reports allowlist coverage in diagnostics when audited layers are missing, so a stale allowlist is visible instead of silent.
+- The experimental tuning options rely on the documented `TICKS_PER_UPDATE`, `MAX_TICKS_PER_UPDATE`, and `MAX_TRANSFERS` variables. They are validated by the game, applied through deep merge, and restored from a baseline captured before the first write.

@@ -1,13 +1,13 @@
 {
   "id": "subway-builder-performance",
   "name": "Performance",
-  "description": "Adaptive map scaling, optional level of detail, presets, and diagnostics for Subway Builder.",
-  "version": "0.2.2",
+  "description": "Adaptive map scaling, optional level of detail, presets, diagnostics, and opt-in simulation tuning for Subway Builder.",
+  "version": "0.3.0",
   "author": {
     "name": "rexmhall09"
   },
   "main": "index.js",
   "dependencies": {
-    "subway-builder": ">=1.4.12 <1.5.0"
+    "subway-builder": ">=1.4.12 <2.0.0"
   }
 }
